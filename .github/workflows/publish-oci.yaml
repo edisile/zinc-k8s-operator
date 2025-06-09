@@ -2,7 +2,7 @@ name: Publish OCI Image
 on:
   push:
     branches:
-      - main
+      - arm64-oci # TODO: change to main
     paths:
       - "rockcraft.yaml"
 
@@ -11,8 +11,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
+  get_version:
     runs-on: ubuntu-24.04
+
+    outputs:
+      ROCK_VERSION: ${{ steps.get_version.outputs.VERSION }}
 
     steps:
       - name: Checkout
@@ -25,6 +28,17 @@ jobs:
           version="$(yq '.version' rockcraft.yaml)"
           echo "VERSION=$version" >> $GITHUB_OUTPUT
 
+  build_amd64:
+    runs-on: ubuntu-24.04
+
+    needs: get_version
+    env:
+      ROCK_VERSION: ${{ needs.get_version.outputs.ROCK_VERSION }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
       - name: Setup LXD
         uses: canonical/setup-lxd@a3c85fc6fb7fff43fcfeae87659e41a8f635b7dd # v0.1.3
 
@@ -36,21 +50,82 @@ jobs:
 
       - name: Upload ROCK to ghcr.io
         run: |
-          # Upload ROCK to ghcr.io/jnsgruk/zinc:<version>
+          # Upload ROCK to ghcr.io/${{ github.repository_owner }}/zinc-amd64:<version>
           sudo skopeo --insecure-policy copy \
             "oci-archive:$(realpath ./zinc_*.rock)" \
-            "docker://ghcr.io/jnsgruk/zinc:${{ steps.get_version.outputs.VERSION }}" \
+            "docker://ghcr.io/${{ github.repository_owner }}/zinc-amd64:${ROCK_VERSION}" \
             --dest-creds "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}"
 
-          # Upload ROCK to ghcr.io/jnsgruk/zinc:latest
+          # Upload ROCK to ghcr.io/${{ github.repository_owner }}/zinc-amd64:latest
           sudo skopeo --insecure-policy copy \
             "oci-archive:$(realpath ./zinc_*.rock)" \
-            "docker://ghcr.io/jnsgruk/zinc:latest" \
+            "docker://ghcr.io/${{ github.repository_owner }}/zinc-amd64:latest" \
             --dest-creds "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}"
+
+  build_arm64:
+    runs-on: ubuntu-24.04-arm
+
+    needs: get_version
+    env:
+      ROCK_VERSION: ${{ needs.get_version.outputs.ROCK_VERSION }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: Setup LXD
+        uses: canonical/setup-lxd@a3c85fc6fb7fff43fcfeae87659e41a8f635b7dd # v0.1.3
+
+      - id: rockcraft
+        name: Build ROCK
+        run: |
+          sudo snap install rockcraft --edge --classic
+          rockcraft pack --verbose
+
+      - name: Upload ROCK to ghcr.io
+        run: |
+          # Upload ROCK to ghcr.io/${{ github.repository_owner }}/zinc-arm64:<version>
+          sudo skopeo --insecure-policy copy \
+            "oci-archive:$(realpath ./zinc_*.rock)" \
+            "docker://ghcr.io/${{ github.repository_owner }}/zinc-arm64:${ROCK_VERSION}" \
+            --dest-creds "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}"
+
+          # Upload ROCK to ghcr.io/${{ github.repository_owner }}/zinc-arm64:latest
+          sudo skopeo --insecure-policy copy \
+            "oci-archive:$(realpath ./zinc_*.rock)" \
+            "docker://ghcr.io/${{ github.repository_owner }}/zinc-arm64:latest" \
+            --dest-creds "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}"
+
+  build_multiarch:
+    runs-on: ubuntu-24.04
+    needs: [get_version, build_amd64,  build_arm64]
+
+    steps:
+      - name: Build multi-arch manifest using the mplatform/manifest-tool Docker image
+        uses: tj-actions/docker-run@v2
+        with:
+          image: mplatform/manifest-tool:latest
+          name: manifest-tool
+          args: |
+            --username ${{ github.actor }} --password ${{ secrets.GITHUB_TOKEN }} \
+            push from-args \
+            --platforms linux/amd64,linux/arm64 \
+            --template ghcr.io/${{ github.repository_owner }}/zinc-ARCH:${{ needs.get_version.outputs.ROCK_VERSION }} \
+            --target ghcr.io/${{ github.repository_owner }}/zinc:${{ needs.get_version.outputs.ROCK_VERSION }} \
+            --tags latest,${{ needs.get_version.outputs.ROCK_VERSION }}
+          # see https://github.com/estesp/manifest-tool to understand template and target syntax
+
+  update_charm:
+    runs-on: ubuntu-24.04
+    needs: [get_version, build_amd64,  build_arm64, build_multiarch]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
 
       - name: Update charm metadata
         run: |
-          version=${{ steps.get_version.outputs.VERSION }}
+          version=${{ needs.get_version.outputs.ROCK_VERSION }}
           sed -i -e "s/zinc:[0-9]\+\.[0-9]\+\.[0-9]\+/zinc:${version}/g" charmcraft.yaml
 
       # We use a Github App and token to allow Github Actions to run properly on the created PR.
@@ -65,12 +140,12 @@ jobs:
         id: cpr
         with:
           token: ${{ steps.generate-token.outputs.token }}
-          commit-message: "chore(deps): bump zinc container image to `zinc:${{ steps.get_version.outputs.VERSION }}`"
+          commit-message: "chore(deps): bump zinc container image to `zinc:${{ needs.get_version.outputs.ROCK_VERSION }}`"
           committer: "Github Actions <github-actions@github.com>"
           author: "Github Actions <github-actions@github.com>"
-          title: "chore(deps): bump container image to `zinc:${{ steps.get_version.outputs.VERSION }}`"
-          body: "chore(deps): bump container image to `zinc:${{ steps.get_version.outputs.VERSION }}`"
-          branch: "auto-container-${{ steps.get_version.outputs.VERSION }}"
+          title: "chore(deps): bump container image to `zinc:${{ needs.get_version.outputs.ROCK_VERSION }}`"
+          body: "chore(deps): bump container image to `zinc:${{ needs.get_version.outputs.ROCK_VERSION }}`"
+          branch: "auto-container-${{ needs.get_version.outputs.ROCK_VERSION }}"
           delete-branch: true
-          reviewers: jnsgruk
-          assignees: jnsgruk
+          reviewers: ${{ github.repository_owner }}
+          assignees: ${{ github.repository_owner }}

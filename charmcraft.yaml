@@ -20,6 +20,7 @@ type: charm
 base: ubuntu@24.04
 platforms:
   amd64:
+  arm64:
 
 parts:
   zinc-charm:
@@ -43,7 +44,7 @@ resources:
     type: oci-image
     description: OCI image for zinc
     # Included for simplicity in integration tests
-    upstream-source: ghcr.io/jnsgruk/zinc:0.4.10
+    upstream-source: ghcr.io/edisile/zinc:0.4.10 # TODO: change to jnsgruk
 
 peers:
   zinc-peers:
